@@ -11,14 +11,12 @@ fn main() -> Result<()> {
         2 => bail!("Missing <command>"),
         _ => {}
     }
-
     // Parse command and act accordingly
     let command = &args[2];
     match command.as_str() {
         ".dbinfo" => commands::dbinfo(&args[1])?,
-        ".table" => commands::table(&args[1])?,
+        ".tables" => commands::table(&args[1])?,
         _ => bail!("Missing or invalid command passed: {}", command),
     }
-
     Ok(())
 }

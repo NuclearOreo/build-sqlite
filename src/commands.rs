@@ -8,6 +8,8 @@ pub fn dbinfo(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn table(_path: &str) -> Result<()> {
+pub fn table(path: &str) -> Result<()> {
+    let table_names = db::read_table_names(path)?;
+    println!("{}", table_names.join(" "));
     Ok(())
 }
