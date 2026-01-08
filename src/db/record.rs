@@ -54,3 +54,72 @@ pub fn extract_text_from_serial_type(serial_type: u64, page: &[u8], pos: usize) 
         None
     }
 }
+
+/// Extract integer value from page data based on serial type.
+///
+/// If the serial type represents an integer, this function extracts
+/// the integer value from the specified position in the page data.
+///
+/// # Arguments
+///
+/// * `serial_type` - The serial type code from the record header
+/// * `page` - The page data containing the integer
+/// * `pos` - The starting position of the integer in the page
+///
+/// # Returns
+///
+/// Returns `Some(i64)` if the serial type represents an integer, `None` otherwise.
+pub fn extract_int_from_serial_type(serial_type: u64, page: &[u8], pos: usize) -> Option<i64> {
+    match serial_type {
+        0 => Some(0), // NULL treated as 0
+        1 => {
+            // 8-bit signed integer
+            let value = page[pos] as i8;
+            Some(value as i64)
+        }
+        2 => {
+            // 16-bit signed big-endian integer
+            let value = i16::from_be_bytes([page[pos], page[pos + 1]]);
+            Some(value as i64)
+        }
+        3 => {
+            // 24-bit signed big-endian integer
+            let value = i32::from_be_bytes([0, page[pos], page[pos + 1], page[pos + 2]]);
+            // Sign extend if negative
+            let value = if page[pos] & 0x80 != 0 {
+                value | 0xFF000000u32 as i32
+            } else {
+                value
+            };
+            Some(value as i64)
+        }
+        4 => {
+            // 32-bit signed big-endian integer
+            let value = i32::from_be_bytes([page[pos], page[pos + 1], page[pos + 2], page[pos + 3]]);
+            Some(value as i64)
+        }
+        5 => {
+            // 48-bit signed big-endian integer
+            let bytes = [0, 0, page[pos], page[pos + 1], page[pos + 2], page[pos + 3], page[pos + 4], page[pos + 5]];
+            let value = i64::from_be_bytes(bytes);
+            // Sign extend if negative
+            let value = if page[pos] & 0x80 != 0 {
+                value | 0xFFFF000000000000u64 as i64
+            } else {
+                value
+            };
+            Some(value)
+        }
+        6 => {
+            // 64-bit signed big-endian integer
+            let value = i64::from_be_bytes([
+                page[pos], page[pos + 1], page[pos + 2], page[pos + 3],
+                page[pos + 4], page[pos + 5], page[pos + 6], page[pos + 7]
+            ]);
+            Some(value)
+        }
+        8 => Some(0), // Integer constant 0
+        9 => Some(1), // Integer constant 1
+        _ => None,
+    }
+}

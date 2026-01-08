@@ -16,7 +16,10 @@ fn main() -> Result<()> {
     match command.as_str() {
         ".dbinfo" => commands::dbinfo(&args[1])?,
         ".tables" => commands::table(&args[1])?,
-        _ => bail!("Missing or invalid command passed: {}", command),
+        _ => {
+            // Treat as SQL query
+            commands::sql(&args[1], command)?
+        }
     }
     Ok(())
 }

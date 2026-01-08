@@ -13,6 +13,7 @@ pub const CELL_POINTER_ARRAY_OFFSET: usize = 8;
 // SQLite schema column indices
 pub const SCHEMA_TYPE_COLUMN: usize = 0;
 pub const SCHEMA_TBL_NAME_COLUMN: usize = 2;
+pub const SCHEMA_ROOTPAGE_COLUMN: usize = 3;
 
 // Varint constants
 pub const VARINT_MAX_BYTES: usize = 9;

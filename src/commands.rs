@@ -58,3 +58,47 @@ pub fn table(path: &str) -> Result<()> {
     println!("{}", table_names.join(" "));
     Ok(())
 }
+
+/// Execute a SQL query.
+///
+/// Currently supports simple SELECT COUNT(*) queries.
+///
+/// # Arguments
+///
+/// * `path` - Path to the SQLite database file
+/// * `query` - The SQL query to execute
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success, or an error if the query fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// sql("sample.db", "SELECT COUNT(*) FROM apples")?;
+/// // Output:
+/// // 4
+/// ```
+pub fn sql(path: &str, query: &str) -> Result<()> {
+    // Simple parser: extract table name from "SELECT COUNT(*) FROM <table>"
+    // Split by space and get the last word
+    let parts: Vec<&str> = query.split_whitespace().collect();
+
+    if parts.is_empty() {
+        anyhow::bail!("Empty query");
+    }
+
+    // Get the table name (last word in the query)
+    let table_name = parts.last().unwrap();
+
+    // Check if this is a COUNT query
+    let upper_query = query.to_uppercase();
+    if upper_query.contains("COUNT") {
+        let count = db::count_table_rows(path, table_name)
+            .context("Failed to count table rows")?;
+        println!("{}", count);
+        Ok(())
+    } else {
+        anyhow::bail!("Unsupported query: {}", query)
+    }
+}

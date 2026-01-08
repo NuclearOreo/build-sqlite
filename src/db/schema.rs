@@ -5,11 +5,11 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use super::constants::{
-    CELL_COUNT_OFFSET, CELL_POINTER_ARRAY_OFFSET, PAGE1_HEADER_OFFSET, SCHEMA_TBL_NAME_COLUMN,
-    SCHEMA_TYPE_COLUMN,
+    CELL_COUNT_OFFSET, CELL_POINTER_ARRAY_OFFSET, PAGE1_HEADER_OFFSET, SCHEMA_ROOTPAGE_COLUMN,
+    SCHEMA_TBL_NAME_COLUMN, SCHEMA_TYPE_COLUMN,
 };
 use super::header::read_page_size;
-use super::record::{extract_text_from_serial_type, get_column_size};
+use super::record::{extract_int_from_serial_type, extract_text_from_serial_type, get_column_size};
 use super::varint::read_varint;
 
 /// Read cell offsets from a page's cell pointer array.
@@ -153,4 +153,169 @@ pub fn read_table_names(path: &str) -> Result<Vec<String>> {
     }
 
     Ok(table_names)
+}
+
+/// Parse a schema cell to extract table metadata including rootpage.
+///
+/// # Arguments
+///
+/// * `page` - The page data containing the cell
+/// * `cell_offset` - The byte offset of the cell in the page
+///
+/// # Returns
+///
+/// Returns `Some((type, table_name, rootpage))` if valid, `None` otherwise.
+fn parse_schema_cell_with_rootpage(page: &[u8], cell_offset: usize) -> Option<(String, String, u32)> {
+    // Read the record size (varint)
+    let (_record_size, bytes_read) = read_varint(page, cell_offset);
+    let mut pos = cell_offset + bytes_read;
+
+    // Read the rowid (varint) - we can ignore this
+    let (_, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    // Parse the record header
+    let record_start = pos;
+    let (header_size, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    // Read serial type codes
+    let mut serial_types = Vec::new();
+    let header_end = record_start + header_size as usize;
+
+    while pos < header_end {
+        let (serial_type, bytes_read) = read_varint(page, pos);
+        serial_types.push(serial_type);
+        pos += bytes_read;
+    }
+
+    // Now read the actual column values
+    // sqlite_schema columns: type, name, tbl_name, rootpage, sql
+    let mut column_index = 0;
+    let mut record_type = String::new();
+    let mut tbl_name = String::new();
+    let mut rootpage: u32 = 0;
+
+    for &serial_type in &serial_types {
+        let column_size = get_column_size(serial_type);
+
+        if column_index == SCHEMA_TYPE_COLUMN {
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                record_type = text;
+            }
+        } else if column_index == SCHEMA_TBL_NAME_COLUMN {
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                tbl_name = text;
+            }
+        } else if column_index == SCHEMA_ROOTPAGE_COLUMN {
+            if let Some(value) = extract_int_from_serial_type(serial_type, page, pos) {
+                rootpage = value as u32;
+            }
+            break; // We have all the columns we need
+        }
+
+        pos += column_size;
+        column_index += 1;
+    }
+
+    if !record_type.is_empty() && !tbl_name.is_empty() && rootpage > 0 {
+        Some((record_type, tbl_name, rootpage))
+    } else {
+        None
+    }
+}
+
+/// Find the rootpage for a given table name.
+///
+/// # Arguments
+///
+/// * `path` - Path to the SQLite database file
+/// * `table_name` - Name of the table to find
+///
+/// # Returns
+///
+/// Returns the rootpage number if found, or an error if not found or read fails.
+pub fn find_table_rootpage(path: &str, table_name: &str) -> Result<u32> {
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let page_size = read_page_size(&mut file)?;
+
+    // Read the first page (sqlite_schema page)
+    let mut page = vec![0u8; page_size as usize];
+    file.seek(std::io::SeekFrom::Start(0))
+        .context("Failed to seek to start of file")?;
+    file.read_exact(&mut page)
+        .context("Failed to read first page")?;
+
+    // Read cell offsets from the page
+    let cell_offsets = read_cell_offsets(&page);
+
+    // Search for the table
+    for cell_offset in cell_offsets {
+        if let Some((record_type, tbl_name, rootpage)) = parse_schema_cell_with_rootpage(&page, cell_offset) {
+            if record_type == "table" && tbl_name == table_name {
+                return Ok(rootpage);
+            }
+        }
+    }
+
+    anyhow::bail!("Table '{}' not found", table_name)
+}
+
+/// Count the number of cells in a page.
+///
+/// # Arguments
+///
+/// * `page` - The page data
+/// * `page_num` - The page number (1-indexed)
+///
+/// # Returns
+///
+/// Returns the number of cells in the page.
+fn count_cells_in_page(page: &[u8], page_num: u32) -> usize {
+    // For page 1, the header starts at offset 100
+    // For other pages, the header starts at offset 0
+    let header_offset = if page_num == 1 { PAGE1_HEADER_OFFSET } else { 0 };
+
+    let num_cells = u16::from_be_bytes([
+        page[header_offset + CELL_COUNT_OFFSET],
+        page[header_offset + CELL_COUNT_OFFSET + 1],
+    ]);
+
+    num_cells as usize
+}
+
+/// Count the number of rows in a table.
+///
+/// # Arguments
+///
+/// * `path` - Path to the SQLite database file
+/// * `table_name` - Name of the table to count rows in
+///
+/// # Returns
+///
+/// Returns the number of rows in the table, or an error if the table
+/// doesn't exist or the database cannot be read.
+pub fn count_table_rows(path: &str, table_name: &str) -> Result<usize> {
+    // Find the rootpage for the table
+    let rootpage = find_table_rootpage(path, table_name)?;
+
+    // Open the database file and get page size
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let page_size = read_page_size(&mut file)?;
+
+    // Calculate the offset to the rootpage
+    // Pages are 1-indexed, so page N starts at offset (N-1) * page_size
+    let page_offset = (rootpage as u64 - 1) * page_size as u64;
+
+    // Read the page
+    let mut page = vec![0u8; page_size as usize];
+    file.seek(std::io::SeekFrom::Start(page_offset))
+        .context("Failed to seek to table page")?;
+    file.read_exact(&mut page)
+        .context("Failed to read table page")?;
+
+    // Count cells in the page
+    let row_count = count_cells_in_page(&page, rootpage);
+
+    Ok(row_count)
 }
