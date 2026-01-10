@@ -1,14 +1,13 @@
 //! SQLite database file parsing and manipulation.
-//!
-//! This module provides functionality for reading and parsing SQLite database files,
-//! including header information, schema tables, and database records.
 
 mod constants;
+mod database;
 mod header;
-mod record;
-mod schema;
 mod varint;
+
+pub mod page;
+pub mod schema;
 
 // Re-export public API
 pub use header::read_db_info;
-pub use schema::{count_table_rows, read_table_names, select_column};
+pub use schema::{count_table_rows, read_table_names, select_columns};

@@ -103,20 +103,33 @@ pub fn sql(path: &str, query: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Parse SELECT column FROM table
-    // Expected format: SELECT <column> FROM <table>
+    // Parse SELECT columns FROM table
+    // Expected format: SELECT <column1>, <column2>, ... FROM <table>
     if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("SELECT") {
-        let from_pos = parts.iter().position(|&p| p.eq_ignore_ascii_case("FROM"));
-        if let Some(from_idx) = from_pos {
-            let column_name = parts[1];
-            let table_name = parts.get(from_idx + 1)
+        // Find FROM position in the original query (case-insensitive)
+        let upper_query_for_from = query.to_uppercase();
+        let from_pos_in_query = upper_query_for_from.find(" FROM ");
+        if let Some(from_idx) = from_pos_in_query {
+            // Extract columns part (between SELECT and FROM)
+            let select_len = "SELECT ".len();
+            let columns_part = &query[select_len..from_idx];
+
+            // Parse column names (comma-separated, trim whitespace)
+            let column_names: Vec<&str> = columns_part
+                .split(',')
+                .map(|s| s.trim())
+                .collect();
+
+            // Extract table name (after FROM)
+            let after_from = &query[from_idx + " FROM ".len()..];
+            let table_name = after_from.split_whitespace().next()
                 .ok_or_else(|| anyhow::anyhow!("Missing table name after FROM"))?;
 
-            let values = db::select_column(path, table_name, column_name)
-                .context("Failed to select column")?;
+            let rows = db::select_columns(path, table_name, &column_names)
+                .context("Failed to select columns")?;
 
-            for value in values {
-                println!("{}", value);
+            for row in rows {
+                println!("{}", row.join("|"));
             }
             return Ok(());
         }

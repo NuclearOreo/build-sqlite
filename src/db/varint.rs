@@ -1,6 +1,8 @@
 //! Variable-length integer (varint) operations for SQLite format.
 
-use super::constants::{VARINT_CONTINUATION_BIT, VARINT_DATA_MASK, VARINT_MAX_BYTES};
+const VARINT_MAX_BYTES: usize = 9;
+const VARINT_CONTINUATION_BIT: u8 = 0x80;
+const VARINT_DATA_MASK: u8 = 0x7F;
 
 /// Read a varint from a byte slice starting at the given position.
 ///
