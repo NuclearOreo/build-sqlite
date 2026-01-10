@@ -22,6 +22,11 @@ pub fn read_varint(data: &[u8], pos: usize) -> (u64, usize) {
     let mut bytes_read = 0;
 
     for i in 0..VARINT_MAX_BYTES {
+        // Check bounds
+        if pos + i >= data.len() {
+            break;
+        }
+
         let byte = data[pos + i];
         bytes_read += 1;
 

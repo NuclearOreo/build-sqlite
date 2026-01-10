@@ -94,7 +94,7 @@ pub fn sql(path: &str, query: &str) -> Result<()> {
     let upper_query = query.to_uppercase();
 
     // Check if this is a COUNT query
-    if upper_query.contains("COUNT") {
+    if upper_query.contains("COUNT(*)") {
         let table_name = parts.last().unwrap();
         let count = db::count_table_rows(path, table_name).context("Failed to count table rows")?;
         println!("{}", count);

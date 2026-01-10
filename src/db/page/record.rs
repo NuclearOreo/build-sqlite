@@ -7,7 +7,13 @@ pub struct Record {
     serial_types: Vec<u64>,
     column_offsets: Vec<usize>,
     data: Vec<u8>,
-    rowid: i64,
+    pub rowid: i64,
+}
+
+/// An index cell contains the indexed value(s) and rowid
+pub struct IndexCell {
+    pub values: Vec<String>,
+    pub rowid: i64,
 }
 
 impl Record {
@@ -145,6 +151,9 @@ pub fn get_column_size(serial_type: u64) -> usize {
 fn extract_text_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Option<String> {
     if serial_type >= 13 && serial_type % 2 == 1 {
         let text_size = ((serial_type - 13) / 2) as usize;
+        if pos + text_size > data.len() {
+            return None;
+        }
         let text_bytes = &data[pos..pos + text_size];
         Some(String::from_utf8_lossy(text_bytes).to_string())
     } else {
@@ -152,19 +161,93 @@ fn extract_text_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> O
     }
 }
 
+/// Parse an index leaf cell.
+/// For index B-trees, the cell format is: payload_size(varint) + payload
+/// The payload contains: record_header + indexed_columns + rowid
+pub fn parse_index_cell(page: &[u8], cell_offset: usize) -> IndexCell {
+    let mut pos = cell_offset;
+
+    // Read payload size
+    let (_payload_size, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    // Now parse the record header
+    let record_start = pos;
+    let (header_size, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    let header_end = record_start + header_size as usize;
+    let mut serial_types = Vec::new();
+
+    // Read all serial types from the header
+    while pos < header_end && pos < page.len() {
+        let (serial_type, bytes_read) = read_varint(page, pos);
+        serial_types.push(serial_type);
+        pos += bytes_read;
+    }
+
+    // The last serial type is for the rowid, everything else is indexed columns
+    let rowid_serial_type = serial_types.pop();
+
+    // Read the indexed column values
+    let mut values = Vec::new();
+    for &serial_type in &serial_types {
+        let size = get_column_size(serial_type);
+
+        // Make sure we have enough data
+        if pos + size > page.len() {
+            break;
+        }
+
+        if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+            values.push(text);
+        } else if let Some(int) = extract_int_from_serial_type(serial_type, page, pos) {
+            values.push(int.to_string());
+        } else if serial_type == 0 {
+            values.push(String::new()); // NULL
+        } else {
+            values.push(String::new());
+        }
+        pos += size;
+    }
+
+    // Read the rowid
+    let rowid = if let Some(serial_type) = rowid_serial_type {
+        let _size = get_column_size(serial_type);
+        if let Some(int) = extract_int_from_serial_type(serial_type, page, pos) {
+            int
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    IndexCell { values, rowid }
+}
+
 /// Extract integer value from data based on serial type.
 fn extract_int_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Option<i64> {
     match serial_type {
         0 => Some(0), // NULL treated as 0
         1 => {
+            if pos >= data.len() {
+                return None;
+            }
             let value = data[pos] as i8;
             Some(value as i64)
         }
         2 => {
+            if pos + 2 > data.len() {
+                return None;
+            }
             let value = i16::from_be_bytes([data[pos], data[pos + 1]]);
             Some(value as i64)
         }
         3 => {
+            if pos + 3 > data.len() {
+                return None;
+            }
             let value = i32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]);
             let value = if data[pos] & 0x80 != 0 {
                 value | 0xFF000000u32 as i32
@@ -174,11 +257,17 @@ fn extract_int_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Op
             Some(value as i64)
         }
         4 => {
+            if pos + 4 > data.len() {
+                return None;
+            }
             let value =
                 i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             Some(value as i64)
         }
         5 => {
+            if pos + 6 > data.len() {
+                return None;
+            }
             let bytes = [
                 0,
                 0,
@@ -198,6 +287,9 @@ fn extract_int_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Op
             Some(value)
         }
         6 => {
+            if pos + 8 > data.len() {
+                return None;
+            }
             let value = i64::from_be_bytes([
                 data[pos],
                 data[pos + 1],

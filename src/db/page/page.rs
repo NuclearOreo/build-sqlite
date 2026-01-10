@@ -129,4 +129,49 @@ impl Page {
 
         (left_child, key as i64)
     }
+
+    /// Parse a cell from an interior index page.
+    /// Returns (left_child_page, key_value)
+    pub fn parse_interior_index_cell(&self, cell_offset: usize) -> Result<(u32, String), String> {
+        let mut pos = cell_offset;
+
+        // Read 4-byte page number of left child
+        let left_child = u32::from_be_bytes([
+            self.data[pos],
+            self.data[pos + 1],
+            self.data[pos + 2],
+            self.data[pos + 3],
+        ]);
+        pos += 4;
+
+        // Read payload size
+        let (_payload_size, bytes_read) = read_varint(&self.data, pos);
+        pos += bytes_read;
+
+        // Parse record header
+        let record_start = pos;
+        let (header_size, bytes_read) = read_varint(&self.data, pos);
+        pos += bytes_read;
+
+        // Read first serial type (for the indexed column)
+        let (serial_type, _) = read_varint(&self.data, pos);
+
+        // Skip to data section
+        pos = record_start + header_size as usize;
+
+        // Extract the key value (first column)
+        let _size = crate::db::page::record::get_column_size(serial_type);
+        if serial_type >= 13 && serial_type % 2 == 1 {
+            // Text
+            let text_size = ((serial_type - 13) / 2) as usize;
+            if pos + text_size <= self.data.len() {
+                let key = String::from_utf8_lossy(&self.data[pos..pos + text_size]).to_string();
+                Ok((left_child, key))
+            } else {
+                Err("Not enough data for key".to_string())
+            }
+        } else {
+            Err("Key is not text".to_string())
+        }
+    }
 }

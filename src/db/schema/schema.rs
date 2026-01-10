@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::db::database::Database;
-use crate::db::page::{Page, Record};
+use crate::db::page::{Page, Record, parse_index_cell};
 
 /// Column indices in the sqlite_schema table.
 const SCHEMA_TYPE_COLUMN: usize = 0;
@@ -37,6 +37,11 @@ impl SchemaEntry {
     /// Check if this is a user table (not an internal sqlite_ table).
     pub fn is_user_table(&self) -> bool {
         self.entry_type == "table" && !self.tbl_name.starts_with("sqlite_")
+    }
+
+    /// Check if this is an index.
+    pub fn is_index(&self) -> bool {
+        self.entry_type == "index"
     }
 }
 
@@ -76,6 +81,29 @@ pub fn find_table(db: &mut Database, table_name: &str) -> Result<SchemaEntry> {
         .into_iter()
         .find(|e| e.entry_type == "table" && e.tbl_name == table_name)
         .ok_or_else(|| anyhow::anyhow!("Table '{}' not found", table_name))
+}
+
+/// Find an index that can be used for a column on a table.
+pub fn find_index_for_column(
+    db: &mut Database,
+    table_name: &str,
+    column_name: &str,
+) -> Result<Option<SchemaEntry>> {
+    let entries = read_schema(db)?;
+
+    // Look for an index on this table and column
+    // Index SQL looks like: CREATE INDEX idx_name on table_name (column_name)
+    for entry in entries {
+        if entry.is_index() {
+            let sql_lower = entry.sql.to_lowercase();
+            let expected_pattern = format!("on {} ({})", table_name, column_name).to_lowercase();
+            if sql_lower.contains(&expected_pattern) {
+                return Ok(Some(entry));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Parse column names from a CREATE TABLE statement.
@@ -159,6 +187,12 @@ pub fn select_columns_with_filter(
     let mut db = Database::open(path)?;
     let table = find_table(&mut db, table_name)?;
 
+    // Parse WHERE clause to get column and value
+    let (filter_column, filter_value) = parse_where_clause(where_clause)?;
+
+    // Check if there's an index on the filter column
+    let index_opt = find_index_for_column(&mut db, table_name, &filter_column)?;
+
     // Parse column names from CREATE TABLE
     let columns = parse_column_names(&table.sql);
 
@@ -182,36 +216,57 @@ pub fn select_columns_with_filter(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Parse WHERE clause (simple equality for now: "column = 'value'")
-    let (filter_column, filter_value) = parse_where_clause(where_clause)?;
-
-    // Find the index of the filter column
-    let filter_column_index = columns
-        .iter()
-        .position(|c| c.eq_ignore_ascii_case(&filter_column))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Column '{}' not found in table '{}'",
-                filter_column,
-                table_name
-            )
-        })?;
-
-    // Collect all records from the B-tree
-    let mut record_data = Vec::new();
-    traverse_btree_table(&mut db, table.rootpage, &mut record_data)?;
-
-    // Filter and extract matching records
     let mut rows = Vec::new();
 
-    for (page_data, offset) in record_data {
-        let (record, _) = Record::parse(&page_data, offset);
+    if let Some(index) = index_opt {
+        // Use index to find matching rowids
+        eprintln!(
+            "Using index {} for column {}",
+            index.tbl_name, filter_column
+        );
+        let matching_rowids = search_index_btree(&mut db, index.rootpage, &filter_value)?;
 
-        // Check if this row matches the filter
-        if let Some(value) = record.read_string(filter_column_index) {
-            if value == filter_value {
-                // This row matches - extract the requested columns
+        // Fetch each record by rowid
+        for rowid in matching_rowids {
+            if let Some((page_data, offset)) = find_record_by_rowid(&mut db, table.rootpage, rowid)?
+            {
+                let (record, _) = Record::parse(&page_data, offset);
                 rows.push(record.read_strings(&column_indices));
+            }
+        }
+    } else {
+        // No index available, do full table scan
+        eprintln!(
+            "No index found for column {}, doing full table scan",
+            filter_column
+        );
+
+        // Find the index of the filter column
+        let filter_column_index = columns
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(&filter_column))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column '{}' not found in table '{}'",
+                    filter_column,
+                    table_name
+                )
+            })?;
+
+        // Collect all records from the B-tree
+        let mut record_data = Vec::new();
+        traverse_btree_table(&mut db, table.rootpage, &mut record_data)?;
+
+        // Filter and extract matching records
+        for (page_data, offset) in record_data {
+            let (record, _) = Record::parse(&page_data, offset);
+
+            // Check if this row matches the filter
+            if let Some(value) = record.read_string(filter_column_index) {
+                if value == filter_value {
+                    // This row matches - extract the requested columns
+                    rows.push(record.read_strings(&column_indices));
+                }
             }
         }
     }
@@ -241,6 +296,148 @@ fn parse_where_clause(where_clause: &str) -> Result<(String, String)> {
 }
 
 /// Traverse a B-tree starting from the given page and collect all leaf records.
+/// Search an index B-tree for matching values and return rowids.
+fn search_index_btree(db: &mut Database, page_num: u32, search_value: &str) -> Result<Vec<i64>> {
+    let page_data = db.read_page(page_num)?;
+    let page = Page::new(page_data, page_num);
+
+    let mut rowids = Vec::new();
+
+    if page.is_leaf() {
+        // This is a leaf page, check each cell
+        let cells = page.cell_offsets();
+        if !cells.is_empty() {
+            // Show first few values for debugging
+            let first_cell = parse_index_cell(page.data(), cells[0]);
+            let last_cell = parse_index_cell(page.data(), cells[cells.len() - 1]);
+            eprintln!(
+                "Page {} range: '{}' to '{}'",
+                page_num,
+                first_cell.values.get(0).unwrap_or(&String::new()),
+                last_cell.values.get(0).unwrap_or(&String::new())
+            );
+        }
+
+        for offset in cells {
+            let cell = parse_index_cell(page.data(), offset);
+            // For now, assume single-column index
+            if !cell.values.is_empty() && cell.values[0] == search_value {
+                eprintln!(
+                    "Found match: rowid={}, value='{}'",
+                    cell.rowid, cell.values[0]
+                );
+                rowids.push(cell.rowid);
+            }
+        }
+        eprintln!(
+            "Searched leaf page {}, found {} matches",
+            page_num,
+            rowids.len()
+        );
+    } else {
+        // This is an interior page, we need to find all matching pages
+        // Since the same value can appear in multiple leaf pages, we need to check
+        // multiple children
+        eprintln!("Searching interior page {}", page_num);
+        let cells = page.cell_offsets();
+        let mut children_to_search = Vec::new();
+
+        // Find all children that might contain our search value
+        for (i, offset) in cells.iter().enumerate() {
+            match page.parse_interior_index_cell(*offset) {
+                Ok((left_child, key)) => {
+                    // The left child contains all values < key
+                    // So if our search_value <= key, we need to search left child
+                    if search_value <= &key {
+                        children_to_search.push(left_child);
+                        // If search_value == key, we also need to search the next child
+                        // because the value might span pages
+                        if search_value == &key && i + 1 < cells.len() {
+                            // The next cell's left child or rightmost if last cell
+                            continue; // Will be handled by next iteration
+                        }
+                    }
+                    // If this is the last cell and search_value >= key,
+                    // we need to search rightmost
+                    if i == cells.len() - 1 && search_value >= &key {
+                        if let Some(rightmost) = page.rightmost_pointer() {
+                            children_to_search.push(rightmost);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // If parsing fails, search this child to be safe
+                    let (left_child, _) = page.parse_interior_cell(*offset);
+                    if left_child != 0 {
+                        children_to_search.push(left_child);
+                    }
+                }
+            }
+        }
+
+        // If no specific children selected, check rightmost
+        if children_to_search.is_empty() {
+            if let Some(rightmost) = page.rightmost_pointer() {
+                children_to_search.push(rightmost);
+            }
+        }
+
+        // Search all selected children
+        for child_page in children_to_search {
+            let mut child_rowids = search_index_btree(db, child_page, search_value)?;
+            rowids.append(&mut child_rowids);
+        }
+    }
+
+    Ok(rowids)
+}
+
+/// Find a record in a table B-tree by rowid.
+fn find_record_by_rowid(
+    db: &mut Database,
+    page_num: u32,
+    target_rowid: i64,
+) -> Result<Option<(Vec<u8>, usize)>> {
+    let page_data = db.read_page(page_num)?;
+    let page = Page::new(page_data, page_num);
+
+    if page.is_leaf() {
+        // Search this leaf page for the rowid
+        for offset in page.cell_offsets() {
+            let (record, _) = Record::parse(page.data(), offset);
+            if record.rowid == target_rowid {
+                return Ok(Some((page.data().to_vec(), offset)));
+            }
+        }
+    } else {
+        // This is an interior page, determine which child to search
+        let mut child_to_search = None;
+
+        // Check each interior cell
+        for offset in page.cell_offsets() {
+            let (left_child, key) = page.parse_interior_cell(offset);
+            if target_rowid <= key {
+                child_to_search = Some(left_child);
+                break;
+            }
+        }
+
+        // If not found in any cell, search the rightmost child
+        if child_to_search.is_none() {
+            if let Some(rightmost) = page.rightmost_pointer() {
+                child_to_search = Some(rightmost);
+            }
+        }
+
+        // Search the appropriate child
+        if let Some(child_page) = child_to_search {
+            return find_record_by_rowid(db, child_page, target_rowid);
+        }
+    }
+
+    Ok(None)
+}
+
 fn traverse_btree_table(
     db: &mut Database,
     page_num: u32,

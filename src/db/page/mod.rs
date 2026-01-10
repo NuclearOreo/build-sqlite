@@ -4,4 +4,4 @@ mod page;
 mod record;
 
 pub use page::Page;
-pub use record::Record;
+pub use record::{Record, parse_index_cell};
