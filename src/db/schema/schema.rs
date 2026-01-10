@@ -101,10 +101,11 @@ pub fn count_table_rows(path: &str, table_name: &str) -> Result<usize> {
     let mut db = Database::open(path)?;
     let table = find_table(&mut db, table_name)?;
 
-    let page_data = db.read_page(table.rootpage)?;
-    let page = Page::new(page_data, table.rootpage);
+    // Collect all records from the B-tree
+    let mut records = Vec::new();
+    traverse_btree_table(&mut db, table.rootpage, &mut records)?;
 
-    Ok(page.cell_count())
+    Ok(records.len())
 }
 
 /// Select multiple columns from a table and return all rows.
@@ -132,15 +133,15 @@ pub fn select_columns(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Read table page and extract rows
-    let page_data = db.read_page(table.rootpage)?;
-    let page = Page::new(page_data, table.rootpage);
+    // Collect all records from the B-tree
+    let mut record_data = Vec::new();
+    traverse_btree_table(&mut db, table.rootpage, &mut record_data)?;
 
-    let rows: Vec<Vec<String>> = page
-        .cell_offsets()
+    // Parse all records and extract requested columns
+    let rows: Vec<Vec<String>> = record_data
         .iter()
-        .map(|&offset| {
-            let (record, _) = Record::parse(page.data(), offset);
+        .map(|(page_data, offset)| {
+            let (record, _) = Record::parse(page_data, *offset);
             record.read_strings(&column_indices)
         })
         .collect();
@@ -162,9 +163,16 @@ pub fn select_columns_with_filter(
     let columns = parse_column_names(&table.sql);
 
     // Find column indices for SELECT columns
+    // Special handling for "id" column which might be the rowid
     let column_indices: Vec<usize> = column_names
         .iter()
         .map(|col_name| {
+            if col_name.eq_ignore_ascii_case("id") {
+                // Check if this is an INTEGER PRIMARY KEY column (which aliases rowid)
+                if table.sql.to_lowercase().contains("id integer primary key") {
+                    return Ok(usize::MAX); // Special marker for rowid
+                }
+            }
             columns
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(col_name))
@@ -189,14 +197,15 @@ pub fn select_columns_with_filter(
             )
         })?;
 
-    // Read table page and extract rows
-    let page_data = db.read_page(table.rootpage)?;
-    let page = Page::new(page_data, table.rootpage);
+    // Collect all records from the B-tree
+    let mut record_data = Vec::new();
+    traverse_btree_table(&mut db, table.rootpage, &mut record_data)?;
 
+    // Filter and extract matching records
     let mut rows = Vec::new();
 
-    for offset in page.cell_offsets() {
-        let (record, _) = Record::parse(page.data(), offset);
+    for (page_data, offset) in record_data {
+        let (record, _) = Record::parse(&page_data, offset);
 
         // Check if this row matches the filter
         if let Some(value) = record.read_string(filter_column_index) {
@@ -229,4 +238,56 @@ fn parse_where_clause(where_clause: &str) -> Result<(String, String)> {
     };
 
     Ok((column.to_string(), value.to_string()))
+}
+
+/// Traverse a B-tree starting from the given page and collect all leaf records.
+fn traverse_btree_table(
+    db: &mut Database,
+    page_num: u32,
+    records: &mut Vec<(Vec<u8>, usize)>,
+) -> Result<()> {
+    let page_data = db.read_page(page_num)?;
+    let page = Page::new(page_data, page_num);
+
+    if page.is_leaf() {
+        // This is a leaf page, collect all records
+        for offset in page.cell_offsets() {
+            records.push((page.data().to_vec(), offset));
+        }
+    } else {
+        // This is an interior page, traverse child pages
+        let mut child_pages = Vec::new();
+
+        // Process each interior cell to get left child pointers
+        for offset in page.cell_offsets() {
+            let (left_child, _key) = page.parse_interior_cell(offset);
+            if left_child == 0 {
+                eprintln!(
+                    "Warning: found zero page number in interior cell at page {}",
+                    page_num
+                );
+                continue;
+            }
+            child_pages.push(left_child);
+        }
+
+        // Add the rightmost child
+        if let Some(rightmost) = page.rightmost_pointer() {
+            if rightmost == 0 {
+                eprintln!(
+                    "Warning: found zero page number in rightmost pointer at page {}",
+                    page_num
+                );
+            } else {
+                child_pages.push(rightmost);
+            }
+        }
+
+        // Recursively traverse all child pages
+        for child_page in child_pages {
+            traverse_btree_table(db, child_page, records)?;
+        }
+    }
+
+    Ok(())
 }

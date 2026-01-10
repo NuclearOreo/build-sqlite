@@ -28,14 +28,22 @@ impl Database {
 
     /// Read a page from the database (1-indexed).
     pub fn read_page(&mut self, page_num: u32) -> Result<Vec<u8>> {
+        if page_num == 0 {
+            anyhow::bail!("Page numbers are 1-indexed, got 0");
+        }
+
         let page_offset = (page_num as u64 - 1) * self.page_size as u64;
         let mut page = vec![0u8; self.page_size];
         self.file
             .seek(std::io::SeekFrom::Start(page_offset))
-            .context("Failed to seek to page")?;
-        self.file
-            .read_exact(&mut page)
-            .context("Failed to read page")?;
+            .context(format!(
+                "Failed to seek to page {} at offset {}",
+                page_num, page_offset
+            ))?;
+        self.file.read_exact(&mut page).context(format!(
+            "Failed to read page {} (offset: {}, size: {})",
+            page_num, page_offset, self.page_size
+        ))?;
         Ok(page)
     }
 

@@ -7,6 +7,7 @@ pub struct Record {
     serial_types: Vec<u64>,
     column_offsets: Vec<usize>,
     data: Vec<u8>,
+    rowid: i64,
 }
 
 impl Record {
@@ -21,7 +22,7 @@ impl Record {
         pos += bytes_read;
 
         // Read rowid (varint)
-        let (_, bytes_read) = read_varint(page, pos);
+        let (rowid, bytes_read) = read_varint(page, pos);
         pos += bytes_read;
 
         // Parse record header
@@ -58,6 +59,7 @@ impl Record {
                 serial_types,
                 column_offsets,
                 data,
+                rowid: rowid as i64,
             },
             offset - start,
         )
@@ -70,7 +72,13 @@ impl Record {
     }
 
     /// Read a column value as a string.
+    /// Special case: column_index of usize::MAX means read the rowid
     pub fn read_string(&self, column_index: usize) -> Option<String> {
+        // Special case for rowid
+        if column_index == usize::MAX {
+            return Some(self.rowid.to_string());
+        }
+
         if column_index >= self.serial_types.len() {
             return None;
         }
