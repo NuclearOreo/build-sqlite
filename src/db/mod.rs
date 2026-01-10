@@ -11,4 +11,4 @@ mod varint;
 
 // Re-export public API
 pub use header::read_db_info;
-pub use schema::{count_table_rows, read_table_names};
+pub use schema::{count_table_rows, read_table_names, select_column};

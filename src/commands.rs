@@ -61,7 +61,7 @@ pub fn table(path: &str) -> Result<()> {
 
 /// Execute a SQL query.
 ///
-/// Currently supports simple SELECT COUNT(*) queries.
+/// Supports SELECT COUNT(*) and SELECT column FROM table queries.
 ///
 /// # Arguments
 ///
@@ -78,27 +78,49 @@ pub fn table(path: &str) -> Result<()> {
 /// sql("sample.db", "SELECT COUNT(*) FROM apples")?;
 /// // Output:
 /// // 4
+///
+/// sql("sample.db", "SELECT name FROM apples")?;
+/// // Output:
+/// // Granny Smith
+/// // Fuji
+/// // ...
 /// ```
 pub fn sql(path: &str, query: &str) -> Result<()> {
-    // Simple parser: extract table name from "SELECT COUNT(*) FROM <table>"
-    // Split by space and get the last word
     let parts: Vec<&str> = query.split_whitespace().collect();
 
     if parts.is_empty() {
         anyhow::bail!("Empty query");
     }
 
-    // Get the table name (last word in the query)
-    let table_name = parts.last().unwrap();
+    let upper_query = query.to_uppercase();
 
     // Check if this is a COUNT query
-    let upper_query = query.to_uppercase();
     if upper_query.contains("COUNT") {
+        let table_name = parts.last().unwrap();
         let count = db::count_table_rows(path, table_name)
             .context("Failed to count table rows")?;
         println!("{}", count);
-        Ok(())
-    } else {
-        anyhow::bail!("Unsupported query: {}", query)
+        return Ok(());
     }
+
+    // Parse SELECT column FROM table
+    // Expected format: SELECT <column> FROM <table>
+    if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("SELECT") {
+        let from_pos = parts.iter().position(|&p| p.eq_ignore_ascii_case("FROM"));
+        if let Some(from_idx) = from_pos {
+            let column_name = parts[1];
+            let table_name = parts.get(from_idx + 1)
+                .ok_or_else(|| anyhow::anyhow!("Missing table name after FROM"))?;
+
+            let values = db::select_column(path, table_name, column_name)
+                .context("Failed to select column")?;
+
+            for value in values {
+                println!("{}", value);
+            }
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("Unsupported query: {}", query)
 }

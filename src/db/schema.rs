@@ -6,7 +6,7 @@ use std::io::prelude::*;
 
 use super::constants::{
     CELL_COUNT_OFFSET, CELL_POINTER_ARRAY_OFFSET, PAGE1_HEADER_OFFSET, SCHEMA_ROOTPAGE_COLUMN,
-    SCHEMA_TBL_NAME_COLUMN, SCHEMA_TYPE_COLUMN,
+    SCHEMA_SQL_COLUMN, SCHEMA_TBL_NAME_COLUMN, SCHEMA_TYPE_COLUMN,
 };
 use super::header::read_page_size;
 use super::record::{extract_int_from_serial_type, extract_text_from_serial_type, get_column_size};
@@ -318,4 +318,216 @@ pub fn count_table_rows(path: &str, table_name: &str) -> Result<usize> {
     let row_count = count_cells_in_page(&page, rootpage);
 
     Ok(row_count)
+}
+
+/// Table information including rootpage and CREATE TABLE SQL.
+pub struct TableInfo {
+    pub rootpage: u32,
+    pub sql: String,
+}
+
+/// Parse a schema cell to extract full table metadata.
+fn parse_schema_cell_full(page: &[u8], cell_offset: usize) -> Option<(String, String, u32, String)> {
+    let (_record_size, bytes_read) = read_varint(page, cell_offset);
+    let mut pos = cell_offset + bytes_read;
+
+    let (_, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    let record_start = pos;
+    let (header_size, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    let mut serial_types = Vec::new();
+    let header_end = record_start + header_size as usize;
+
+    while pos < header_end {
+        let (serial_type, bytes_read) = read_varint(page, pos);
+        serial_types.push(serial_type);
+        pos += bytes_read;
+    }
+
+    let mut record_type = String::new();
+    let mut tbl_name = String::new();
+    let mut rootpage: u32 = 0;
+    let mut sql = String::new();
+
+    for (column_index, &serial_type) in serial_types.iter().enumerate() {
+        let column_size = get_column_size(serial_type);
+
+        if column_index == SCHEMA_TYPE_COLUMN {
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                record_type = text;
+            }
+        } else if column_index == SCHEMA_TBL_NAME_COLUMN {
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                tbl_name = text;
+            }
+        } else if column_index == SCHEMA_ROOTPAGE_COLUMN {
+            if let Some(value) = extract_int_from_serial_type(serial_type, page, pos) {
+                rootpage = value as u32;
+            }
+        } else if column_index == SCHEMA_SQL_COLUMN {
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                sql = text;
+            }
+            break;
+        }
+
+        pos += column_size;
+    }
+
+    if !record_type.is_empty() && !tbl_name.is_empty() {
+        Some((record_type, tbl_name, rootpage, sql))
+    } else {
+        None
+    }
+}
+
+/// Get table info (rootpage and SQL) for a given table name.
+pub fn get_table_info(path: &str, table_name: &str) -> Result<TableInfo> {
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let page_size = read_page_size(&mut file)?;
+
+    let mut page = vec![0u8; page_size as usize];
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.read_exact(&mut page)?;
+
+    let cell_offsets = read_cell_offsets(&page);
+
+    for cell_offset in cell_offsets {
+        if let Some((record_type, tbl_name, rootpage, sql)) = parse_schema_cell_full(&page, cell_offset) {
+            if record_type == "table" && tbl_name == table_name {
+                return Ok(TableInfo { rootpage, sql });
+            }
+        }
+    }
+
+    anyhow::bail!("Table '{}' not found", table_name)
+}
+
+/// Parse column names from a CREATE TABLE statement.
+/// Returns a list of column names in order.
+pub fn parse_column_names(create_sql: &str) -> Vec<String> {
+    // Find the content between the first ( and last )
+    let start = match create_sql.find('(') {
+        Some(idx) => idx + 1,
+        None => return Vec::new(),
+    };
+    let end = match create_sql.rfind(')') {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+
+    let columns_part = &create_sql[start..end];
+
+    let mut columns = Vec::new();
+    for column_def in columns_part.split(',') {
+        let column_def = column_def.trim();
+        // The column name is the first word
+        if let Some(name) = column_def.split_whitespace().next() {
+            columns.push(name.to_string());
+        }
+    }
+
+    columns
+}
+
+/// Read cell offsets from any page (not just page 1).
+fn read_cell_offsets_from_page(page: &[u8], page_num: u32) -> Vec<usize> {
+    let header_offset = if page_num == 1 { PAGE1_HEADER_OFFSET } else { 0 };
+
+    let num_cells = u16::from_be_bytes([
+        page[header_offset + CELL_COUNT_OFFSET],
+        page[header_offset + CELL_COUNT_OFFSET + 1],
+    ]);
+
+    let cell_pointer_array_offset = header_offset + CELL_POINTER_ARRAY_OFFSET;
+    let mut cell_offsets = Vec::new();
+
+    for i in 0..num_cells {
+        let offset_pos = cell_pointer_array_offset + (i as usize * 2);
+        let cell_offset = u16::from_be_bytes([page[offset_pos], page[offset_pos + 1]]);
+        cell_offsets.push(cell_offset as usize);
+    }
+
+    cell_offsets
+}
+
+/// Extract a column value from a table cell as a string.
+fn extract_column_value(page: &[u8], cell_offset: usize, column_index: usize) -> Option<String> {
+    let (_record_size, bytes_read) = read_varint(page, cell_offset);
+    let mut pos = cell_offset + bytes_read;
+
+    // Read rowid
+    let (_, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    // Parse record header
+    let record_start = pos;
+    let (header_size, bytes_read) = read_varint(page, pos);
+    pos += bytes_read;
+
+    let mut serial_types = Vec::new();
+    let header_end = record_start + header_size as usize;
+
+    while pos < header_end {
+        let (serial_type, bytes_read) = read_varint(page, pos);
+        serial_types.push(serial_type);
+        pos += bytes_read;
+    }
+
+    // Navigate to the target column
+    for (idx, &serial_type) in serial_types.iter().enumerate() {
+        if idx == column_index {
+            // Try to extract as text
+            if let Some(text) = extract_text_from_serial_type(serial_type, page, pos) {
+                return Some(text);
+            }
+            // Try to extract as integer
+            if let Some(int_val) = extract_int_from_serial_type(serial_type, page, pos) {
+                return Some(int_val.to_string());
+            }
+            return None;
+        }
+        pos += get_column_size(serial_type);
+    }
+
+    None
+}
+
+/// Select a column from a table and return all values.
+pub fn select_column(path: &str, table_name: &str, column_name: &str) -> Result<Vec<String>> {
+    // Get table info
+    let table_info = get_table_info(path, table_name)?;
+
+    // Parse column names from CREATE TABLE
+    let columns = parse_column_names(&table_info.sql);
+
+    // Find the column index
+    let column_index = columns
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| anyhow::anyhow!("Column '{}' not found in table '{}'", column_name, table_name))?;
+
+    // Open database and read the table's page
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let page_size = read_page_size(&mut file)?;
+
+    let page_offset = (table_info.rootpage as u64 - 1) * page_size as u64;
+    let mut page = vec![0u8; page_size as usize];
+    file.seek(std::io::SeekFrom::Start(page_offset))?;
+    file.read_exact(&mut page)?;
+
+    // Read all cells and extract column values
+    let cell_offsets = read_cell_offsets_from_page(&page, table_info.rootpage);
+    let mut values = Vec::new();
+
+    for cell_offset in cell_offsets {
+        if let Some(value) = extract_column_value(&page, cell_offset, column_index) {
+            values.push(value);
+        }
+    }
+
+    Ok(values)
 }

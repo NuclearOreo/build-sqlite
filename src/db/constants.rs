@@ -14,6 +14,7 @@ pub const CELL_POINTER_ARRAY_OFFSET: usize = 8;
 pub const SCHEMA_TYPE_COLUMN: usize = 0;
 pub const SCHEMA_TBL_NAME_COLUMN: usize = 2;
 pub const SCHEMA_ROOTPAGE_COLUMN: usize = 3;
+pub const SCHEMA_SQL_COLUMN: usize = 4;
 
 // Varint constants
 pub const VARINT_MAX_BYTES: usize = 9;
