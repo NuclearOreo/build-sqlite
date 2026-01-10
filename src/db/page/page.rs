@@ -16,7 +16,10 @@ impl Page {
         } else {
             0
         };
-        Self { data, header_offset }
+        Self {
+            data,
+            header_offset,
+        }
     }
 
     /// Get the raw page data.

@@ -10,4 +10,4 @@ pub mod schema;
 
 // Re-export public API
 pub use header::read_db_info;
-pub use schema::{count_table_rows, read_table_names, select_columns};
+pub use schema::{count_table_rows, read_table_names, select_columns, select_columns_with_filter};

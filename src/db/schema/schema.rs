@@ -108,7 +108,11 @@ pub fn count_table_rows(path: &str, table_name: &str) -> Result<usize> {
 }
 
 /// Select multiple columns from a table and return all rows.
-pub fn select_columns(path: &str, table_name: &str, column_names: &[&str]) -> Result<Vec<Vec<String>>> {
+pub fn select_columns(
+    path: &str,
+    table_name: &str,
+    column_names: &[&str],
+) -> Result<Vec<Vec<String>>> {
     let mut db = Database::open(path)?;
     let table = find_table(&mut db, table_name)?;
 
@@ -122,7 +126,9 @@ pub fn select_columns(path: &str, table_name: &str, column_names: &[&str]) -> Re
             columns
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(col_name))
-                .ok_or_else(|| anyhow::anyhow!("Column '{}' not found in table '{}'", col_name, table_name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column '{}' not found in table '{}'", col_name, table_name)
+                })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -140,4 +146,87 @@ pub fn select_columns(path: &str, table_name: &str, column_names: &[&str]) -> Re
         .collect();
 
     Ok(rows)
+}
+
+/// Select multiple columns from a table with a WHERE filter and return matching rows.
+pub fn select_columns_with_filter(
+    path: &str,
+    table_name: &str,
+    column_names: &[&str],
+    where_clause: &str,
+) -> Result<Vec<Vec<String>>> {
+    let mut db = Database::open(path)?;
+    let table = find_table(&mut db, table_name)?;
+
+    // Parse column names from CREATE TABLE
+    let columns = parse_column_names(&table.sql);
+
+    // Find column indices for SELECT columns
+    let column_indices: Vec<usize> = column_names
+        .iter()
+        .map(|col_name| {
+            columns
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(col_name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column '{}' not found in table '{}'", col_name, table_name)
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Parse WHERE clause (simple equality for now: "column = 'value'")
+    let (filter_column, filter_value) = parse_where_clause(where_clause)?;
+
+    // Find the index of the filter column
+    let filter_column_index = columns
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case(&filter_column))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Column '{}' not found in table '{}'",
+                filter_column,
+                table_name
+            )
+        })?;
+
+    // Read table page and extract rows
+    let page_data = db.read_page(table.rootpage)?;
+    let page = Page::new(page_data, table.rootpage);
+
+    let mut rows = Vec::new();
+
+    for offset in page.cell_offsets() {
+        let (record, _) = Record::parse(page.data(), offset);
+
+        // Check if this row matches the filter
+        if let Some(value) = record.read_string(filter_column_index) {
+            if value == filter_value {
+                // This row matches - extract the requested columns
+                rows.push(record.read_strings(&column_indices));
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Parse a simple WHERE clause of the form "column = 'value'"
+fn parse_where_clause(where_clause: &str) -> Result<(String, String)> {
+    // Simple parsing for "column = 'value'" pattern
+    let parts: Vec<&str> = where_clause.split('=').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid WHERE clause format. Expected: column = 'value'");
+    }
+
+    let column = parts[0].trim();
+    let value_part = parts[1].trim();
+
+    // Remove quotes from value if present
+    let value = if value_part.starts_with('\'') && value_part.ends_with('\'') {
+        &value_part[1..value_part.len() - 1]
+    } else {
+        value_part
+    };
+
+    Ok((column.to_string(), value.to_string()))
 }

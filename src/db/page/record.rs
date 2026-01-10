@@ -51,10 +51,7 @@ impl Record {
 
         // Adjust offsets to be relative to data start
         let data_start = pos;
-        let column_offsets: Vec<usize> = column_offsets
-            .iter()
-            .map(|&o| o - data_start)
-            .collect();
+        let column_offsets: Vec<usize> = column_offsets.iter().map(|&o| o - data_start).collect();
 
         (
             Self {
@@ -119,17 +116,17 @@ impl Record {
 /// Get the size in bytes of a column value based on its serial type code.
 pub fn get_column_size(serial_type: u64) -> usize {
     match serial_type {
-        0 => 0,  // NULL
-        1 => 1,  // 8-bit integer
-        2 => 2,  // 16-bit integer
-        3 => 3,  // 24-bit integer
-        4 => 4,  // 32-bit integer
-        5 => 6,  // 48-bit integer
-        6 => 8,  // 64-bit integer
-        7 => 8,  // IEEE 754 float
-        8 => 0,  // Integer constant 0
-        9 => 0,  // Integer constant 1
-        10 | 11 => 0, // Reserved
+        0 => 0,                                                // NULL
+        1 => 1,                                                // 8-bit integer
+        2 => 2,                                                // 16-bit integer
+        3 => 3,                                                // 24-bit integer
+        4 => 4,                                                // 32-bit integer
+        5 => 6,                                                // 48-bit integer
+        6 => 8,                                                // 64-bit integer
+        7 => 8,                                                // IEEE 754 float
+        8 => 0,                                                // Integer constant 0
+        9 => 0,                                                // Integer constant 1
+        10 | 11 => 0,                                          // Reserved
         n if n >= 12 && n % 2 == 0 => ((n - 12) / 2) as usize, // BLOB
         n if n >= 13 && n % 2 == 1 => ((n - 13) / 2) as usize, // Text string
         _ => 0,
@@ -169,11 +166,21 @@ fn extract_int_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Op
             Some(value as i64)
         }
         4 => {
-            let value = i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let value =
+                i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             Some(value as i64)
         }
         5 => {
-            let bytes = [0, 0, data[pos], data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]];
+            let bytes = [
+                0,
+                0,
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+                data[pos + 4],
+                data[pos + 5],
+            ];
             let value = i64::from_be_bytes(bytes);
             let value = if data[pos] & 0x80 != 0 {
                 value | 0xFFFF000000000000u64 as i64
@@ -184,8 +191,14 @@ fn extract_int_from_serial_type(serial_type: u64, data: &[u8], pos: usize) -> Op
         }
         6 => {
             let value = i64::from_be_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
             ]);
             Some(value)
         }

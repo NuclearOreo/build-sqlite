@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 /// // number of tables: 3
 /// ```
 pub fn dbinfo(path: &str) -> Result<()> {
-    let (page_size, number_of_tables) = db::read_db_info(path)
-        .context("Failed to read database info")?;
+    let (page_size, number_of_tables) =
+        db::read_db_info(path).context("Failed to read database info")?;
     println!("database page size: {}", page_size);
     println!("number of tables: {}", number_of_tables);
     Ok(())
@@ -53,8 +53,7 @@ pub fn dbinfo(path: &str) -> Result<()> {
 /// // users posts comments
 /// ```
 pub fn table(path: &str) -> Result<()> {
-    let table_names = db::read_table_names(path)
-        .context("Failed to read table names")?;
+    let table_names = db::read_table_names(path).context("Failed to read table names")?;
     println!("{}", table_names.join(" "));
     Ok(())
 }
@@ -97,14 +96,13 @@ pub fn sql(path: &str, query: &str) -> Result<()> {
     // Check if this is a COUNT query
     if upper_query.contains("COUNT") {
         let table_name = parts.last().unwrap();
-        let count = db::count_table_rows(path, table_name)
-            .context("Failed to count table rows")?;
+        let count = db::count_table_rows(path, table_name).context("Failed to count table rows")?;
         println!("{}", count);
         return Ok(());
     }
 
-    // Parse SELECT columns FROM table
-    // Expected format: SELECT <column1>, <column2>, ... FROM <table>
+    // Parse SELECT columns FROM table [WHERE condition]
+    // Expected format: SELECT <column1>, <column2>, ... FROM <table> [WHERE <column> = <value>]
     if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("SELECT") {
         // Find FROM position in the original query (case-insensitive)
         let upper_query_for_from = query.to_uppercase();
@@ -115,18 +113,38 @@ pub fn sql(path: &str, query: &str) -> Result<()> {
             let columns_part = &query[select_len..from_idx];
 
             // Parse column names (comma-separated, trim whitespace)
-            let column_names: Vec<&str> = columns_part
-                .split(',')
-                .map(|s| s.trim())
-                .collect();
+            let column_names: Vec<&str> = columns_part.split(',').map(|s| s.trim()).collect();
 
-            // Extract table name (after FROM)
+            // Extract table name and optional WHERE clause
             let after_from = &query[from_idx + " FROM ".len()..];
-            let table_name = after_from.split_whitespace().next()
-                .ok_or_else(|| anyhow::anyhow!("Missing table name after FROM"))?;
 
-            let rows = db::select_columns(path, table_name, &column_names)
-                .context("Failed to select columns")?;
+            // Check if there's a WHERE clause
+            let upper_after_from = after_from.to_uppercase();
+            let where_pos = upper_after_from.find(" WHERE ");
+
+            let (table_name, where_clause) = if let Some(where_idx) = where_pos {
+                let table_part = &after_from[..where_idx];
+                let table_name = table_part
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("Missing table name after FROM"))?;
+                let where_part = &after_from[where_idx + " WHERE ".len()..];
+                (table_name, Some(where_part))
+            } else {
+                let table_name = after_from
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("Missing table name after FROM"))?;
+                (table_name, None)
+            };
+
+            let rows = if let Some(where_clause) = where_clause {
+                db::select_columns_with_filter(path, table_name, &column_names, where_clause)
+                    .context("Failed to select columns with filter")?
+            } else {
+                db::select_columns(path, table_name, &column_names)
+                    .context("Failed to select columns")?
+            };
 
             for row in rows {
                 println!("{}", row.join("|"));

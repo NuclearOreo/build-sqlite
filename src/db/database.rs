@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::prelude::*;
 
-use super::constants::{PAGE1_HEADER_OFFSET, PAGE_SIZE_OFFSET};
+use super::constants::{PAGE_SIZE_OFFSET, PAGE1_HEADER_OFFSET};
 
 /// A SQLite database file handle.
 pub struct Database {
